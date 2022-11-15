@@ -1,0 +1,2 @@
+project(netdata_to_userland_perftest)
+cmake_minimum_required(VERSION 3.22)
