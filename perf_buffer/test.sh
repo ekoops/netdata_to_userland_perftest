@@ -9,14 +9,16 @@ function cleanup {
 	set +e
 	[[ -n "$SERVER_PID" ]] && kill "$SERVER_PID"
 	[[ -n "$PERF_READER_PID" ]] && wait "$PERF_READER_PID"
-	ip link set dev veth0 xdpdrv off
+#	ip link set dev veth0 xdpdrv off
   ../testbed_cleanup.sh
 }
 trap cleanup EXIT
 
 set -x -e
 
+CLIENT_IFACE_NAME=${CLIENT_IFACE_NAME:-veth0_}
 CLIENT_ADDR=${CLIENT_ADDR:-10.0.0.1}
+SERVER_IFACE_NAME=${SERVER_IFACE_NAME:-veth0}
 SERVER_ADDR=${SERVER_ADDR:-10.0.0.2}
 CLIENT_PIN_CORE_NUM=0
 SERVER_PIN_CORE_NUM=2
@@ -29,12 +31,11 @@ CLIENT_ADDR="$CLIENT_ADDR" SERVER_ADDR="$SERVER_ADDR" ../testbed_setup.sh
 iperf3 -s "$SERVER_ADDR" &> /dev/null &
 SERVER_PID=$!
 
-# load and attach XDP program
-ip link set dev veth0 xdpdrv obj .output/perf_buffer.bpf.o sec xdp_probe
+# get ifindex of the interface on which the iperf3 server will listen
+SERVER_IFACE_IFINDEX=$(ip -o link | grep "$SERVER_IFACE_NAME" | cut -d ':' -f 1)
 
-# start perf buffer reader in background
-PERF_BUFFER_ID="$(bpftool map show | grep pb | head -n 1 | cut -f 1 -d ':')"
-./.output/perf_buffer "$PERF_BUFFER_ID" 8 &
+# load and attach XDP program on the interface and start to read from perf buffer in background
+./.output/perf_buffer "$SERVER_IFACE_IFINDEX" 8 &
 PERF_READER_PID=$!
 
 # wait for perf buffer reader to be ready

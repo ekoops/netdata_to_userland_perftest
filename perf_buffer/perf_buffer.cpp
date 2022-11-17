@@ -12,6 +12,7 @@
 #include <time.h>
 #include <mutex>
 #include <condition_variable>
+#include ".output/perf_buffer.skel.h"
 
 int cpu_num;
 unsigned long long *samples = NULL;
@@ -81,18 +82,21 @@ void wait_for_signal() {
 
 int main(int argc, char **argv) {
     int err;
-    unsigned int pb_id, pb_fd;
+    int ifindex;
     unsigned long pb_per_cpu_pages, pb_per_cpu_page_size;
+    struct perf_buffer_bpf *skel;
+    unsigned int pb_prog_fd, pb_map_fd;
     struct perf_buffer *pb = NULL;
 
-    if (argc < 2) {
-        fprintf(stderr, "usage: <prog_name> <pb_id> [<per_cpu_buffer_pages>]\n");
+    if (argc > 3) {
+        fprintf(stderr, "Usage: ./<prog_name> <ifindex> [<per_cpu_buffer_pages>]\n");
         return 1;
     }
 
-    pb_id = atoi(argv[1]);
-    if (!pb_id) {
-        fprintf(stderr, "Failed to parse perf buffer id\n");
+    // parsing arguments
+    ifindex = atoi(argv[1]);
+    if (!ifindex) {
+        fprintf(stderr, "Failed to parse <ifindex> parameter\n");
         return 2;
     }
     if (argc == 3) {
@@ -103,7 +107,7 @@ int main(int argc, char **argv) {
         }
     }
     else {
-        pb_per_cpu_pages = 32;
+        pb_per_cpu_pages = 8;
     }
     pb_per_cpu_page_size = sysconf(_SC_PAGESIZE);
     printf("Per-core buffer size set to %lu bytes (pages: %lu, size: %lu)\t\n",
@@ -125,16 +129,39 @@ int main(int argc, char **argv) {
 
     /* Set up libbpf logging callback */
     libbpf_set_print(libbpf_print_fn);
-
+    libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
     /* Bump RLIMIT_MEMLOCK to create BPF maps */
     bump_memlock_rlimit();
 
-    pb_fd = bpf_map_get_fd_by_id(pb_id);
-    pb = perf_buffer__new(pb_fd, pb_per_cpu_pages, pb_sample_handler, pb_lost_handler, NULL , NULL);
+    // open and load the skeleton
+    skel = perf_buffer_bpf__open_and_load();
+    if (!skel) {
+        fprintf(stderr, "Failed to open skeleton\n");
+        goto free_stats_cleanup;
+    }
+    pb_prog_fd = bpf_program__fd(skel->progs.xdp_probe_f);
+    if (pb_prog_fd == EINVAL) {
+        fprintf(stderr, "Failed to get XDP program file descriptor\n");
+        goto cleanup_skel_destroy;
+    }
+
+    err = bpf_xdp_attach(ifindex, pb_prog_fd, 0, NULL);
+    if (err) {
+        fprintf(stderr, "Failed to attach XDP program\n");
+        goto cleanup_skel_destroy;
+    }
+
+    pb_map_fd = bpf_map__fd(skel->maps.pb);
+    if (pb_map_fd == EINVAL) {
+        fprintf(stderr, "Failed to get perf buffer file descriptor\n");
+        goto cleanup_xdp_detach;
+    }
+
+    pb = perf_buffer__new(pb_map_fd, pb_per_cpu_pages, pb_sample_handler, pb_lost_handler, NULL , NULL);
     if (libbpf_get_error(pb)) {
         err = 4;
         fprintf(stderr, "Failed to create perf buffer\n");
-        goto cleanup;
+        goto cleanup_xdp_detach;
     }
 
     /* Clean handling of Ctrl-C */
@@ -158,10 +185,15 @@ int main(int argc, char **argv) {
         }
     }
     end = time(NULL);
+    print_stats();
 
 cleanup:
     perf_buffer__free(pb);
-    print_stats();
+cleanup_xdp_detach:
+    bpf_xdp_detach(ifindex, 0, NULL);
+cleanup_skel_destroy:
+    perf_buffer_bpf__destroy(skel);
+free_stats_cleanup:
     free(samples);
     free(losts);
 

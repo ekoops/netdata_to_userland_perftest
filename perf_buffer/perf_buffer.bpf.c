@@ -11,7 +11,7 @@ struct metadata {
     __u64 packet_len;
 };
 
-SEC("xdp_probe")
+SEC("xdp")
 int xdp_probe_f(struct xdp_md *ctx) {
     __u64 len = (ctx->data_end - ctx->data);
     __u64 flags = (len << 32) | BPF_F_CURRENT_CPU;
