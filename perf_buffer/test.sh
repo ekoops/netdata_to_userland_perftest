@@ -45,5 +45,6 @@ sleep 3
 kill -SIGINT $PERF_READER_PID
 # start iperf3 client
 ip netns exec ns0 iperf3 -A $CLIENT_PIN_CORE_NUM,$SERVER_PIN_CORE_NUM -c "$SERVER_ADDR" --sctp -l $SCTP_PACKET_LEN
-# notify perf buffer reader to stop reading
+# notify perf buffer reader to stop reading and wait for it to exit
 kill -SIGINT $PERF_READER_PID
+wait $PERF_READER_PID
