@@ -9,6 +9,7 @@
 #include <csignal>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
+#include <linux/if_link.h>
 #include <sys/resource.h>
 #include ".output/perf_buffer.skel.h"
 
@@ -146,7 +147,7 @@ int main(int argc, char **argv) {
     }
 
     // attach XDP program to the interface corresponding to the provided ifindex
-    err = bpf_xdp_attach(ifindex, pb_prog_fd, 0, NULL);
+    err = bpf_xdp_attach(ifindex, pb_prog_fd, XDP_FLAGS_DRV_MODE, NULL);
     if (err) {
         std::cerr << "Failed to attach XDP program" << std::endl;
         goto cleanup_skel_destroy;
