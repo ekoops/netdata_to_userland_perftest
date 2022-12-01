@@ -61,7 +61,7 @@ void print_stats(int cpu_num) {
     int i;
     unsigned long long samples_tot = 0, losts_tot = 0;
     auto w = std::setw(21);
-    std::cout << "\n\t" << std::setw(21) << "Samples" << w << "Losts" << std::endl;
+    std::cout << "\n\t" << w << "Samples" << w << "Losts" << std::endl;
     for (i = 0; i < cpu_num; i++) {
         samples_tot += samples[i];
         losts_tot += losts[i];

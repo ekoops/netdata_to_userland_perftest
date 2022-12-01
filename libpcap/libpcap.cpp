@@ -1,33 +1,31 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <signal.h>
-#include <pcap/pcap.h>
 #include <mutex>
 #include <condition_variable>
-
-#define perr(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+#include <iostream>
+#include <iomanip>
+#include <csignal>
+#include <pcap/pcap.h>
 
 #define SNAPSHOT_LEN            65535
 #define PKT_BUFFER_TIMEOUT_MS   10000
 #define CAPTURE_BUFFER_SIZE     (2 << 16)
 
 #define SET_OPTION_OR_EXIT(pcap_h, set_opt_func, opt_value, err_msg, exit_code) \
-    ({                                                   \
+    ({                                                  \
         if (set_opt_func(pcap_h, opt_value)) {          \
-            perr("%s\n", err_msg);                      \
+            std::cerr << err_msg << std::endl;          \
             exit(exit_code);                            \
         }                                               \
     })
 
-
 pcap_t *handle = NULL;
-unsigned long long samples = 0;
-unsigned long long losts = 0;
-std::mutex m;
-std::condition_variable cv;
-int state = 0;
-time_t start, end;
 
+int state = 0;
+std::mutex state_mutex;
+std::condition_variable state_cv;
+
+unsigned long long samples;
+unsigned long long losts;
+std::chrono::time_point <std::chrono::system_clock> start, end;
 
 void pcap_set_options() {
     SET_OPTION_OR_EXIT(handle, pcap_set_snaplen, SNAPSHOT_LEN, "Failed to set the snapshot length", 101);
@@ -41,86 +39,105 @@ void pcap_handler_cb(u_char *user, const struct pcap_pkthdr *pkt_hdr, const u_ch
 }
 
 static void sig_handler(int sig) {
-    std::unique_lock<std::mutex> ul {m};
+    std::unique_lock <std::mutex> ul{state_mutex};
     if (state == 0) {
-        start = time(NULL);
+        start = std::chrono::system_clock::now();
     }
     state++;
-    cv.notify_all();
     if (state == 2) {
         pcap_breakloop(handle);
+    }
+    state_cv.notify_all();
+}
+
+void wait_for_signal() {
+    std::unique_lock <std::mutex> ul{state_mutex};
+
+    while (state == 0) {
+        state_cv.wait(ul);
     }
 }
 
 void print_stats() {
-    printf("Total:\t%21llu%21llu\n", samples, losts);
-    time_t time = end - start;
-    printf("Time:\t%21ld\n", time);
-    printf("Pps:\t%21llu\n", samples / time);
+    auto w = std::setw(21);
+    std::cout << "Total:\t" << w << samples << w << losts << std::endl;
+    std::chrono::duration<double> time = end - start;
+    std::cout << "Time:\t" << w << time.count() << std::endl;
+    std::cout << "Pps:\t" << w << (samples / time.count()) << std::endl;
 }
 
-void wait_for_signal() {
-    std::unique_lock<std::mutex> ul {m};
-
-    while (state == 0) {
-        cv.wait(ul);
-    }
-}
 
 int main(int argc, char *argv[]) {
     int err;
     const char *err_msg;
+    int exit_code = 0;
     char errbuf[PCAP_ERRBUF_SIZE];
     char *dev_name;
 
     if (argc < 2) {
-        perr("Usage: ./<prog_name> <dev_name>");
-        return 1;
+        std::cerr << "Usage: ./<prog_name> <dev_name>" << std::endl;
+        exit_code = 1;
+        goto cleanup;
     }
     dev_name = argv[1];
 
     // init the pcap library
     err = pcap_init(PCAP_CHAR_ENC_UTF_8, errbuf);
     if (err) {
-        perr("%s\n", errbuf);
-        return 2;
+        std::cerr << errbuf << std::endl;
+        exit_code = 2;
+        goto cleanup;
     }
+
     // get a packet capture handle for the specified device
     handle = pcap_create(dev_name, errbuf);
     if (!handle) {
-        perr("%s\n", errbuf);
-        return 3;
+        std::cerr << errbuf << std::endl;
+        exit_code = 3;
+        goto cleanup;
     }
+
     // set capture options
     pcap_set_options();
 
-    // start capture
+    // activate capture
     err = pcap_activate(handle);
     if (err) { // print error and exit if an error or a warning is returned
         err_msg = pcap_statustostr(err);
-        perr("%s\n", err_msg);
-        pcap_close(handle);
-        return 4;
+        std::cerr << err_msg << std::endl;
+        exit_code = 4;
+        goto cleanup;
     }
 
-    /* Clean handling of Ctrl-C */
-    signal(SIGINT, sig_handler);
-    signal(SIGTERM, sig_handler);
+    // Register signal handlers
+    std::signal(SIGINT, sig_handler);
+    std::signal(SIGTERM, sig_handler);
 
+    // wait for signal before start reading
+    std::cout << "Waiting for external signal..." << std::endl;
     wait_for_signal();
 
+    // start reading loop
+    std::cout << "Starting to read..." << std::endl;
     err = pcap_loop(handle, -1, pcap_handler_cb, NULL);
     switch (err) {
         case PCAP_ERROR:
             err_msg = pcap_statustostr(err);
-            perr("%s\n", err_msg);
-            return 5;
+            std::cerr << err_msg << std::endl;
+            exit_code = 5;
+            goto cleanup;
         case PCAP_ERROR_NOT_ACTIVATED:
-            perr("Error: %d\n", err);
-            return 6;
-        default:
-            end = time(NULL);
+            std::cerr << "Error: " << err << std::endl;
+            exit_code = 6;
+            goto cleanup;
+        default: // match if PCAP_ERROR_BREAK or 0 (0 never happen)
+            end = std::chrono::system_clock::now();
             print_stats();
-            return 0;
     }
+
+    cleanup:
+    if (handle) {
+        pcap_close(handle);
+    }
+    return exit_code;
 }
