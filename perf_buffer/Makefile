@@ -1,5 +1,3 @@
-.PHONY: build-bpf build-cp
-
 OUTPUT := .output
 CLANG := clang
 CLANG++ := clang++
