@@ -9,7 +9,7 @@ function cleanup {
 	set +e
 	[[ -n "$SERVER_PID" ]] && kill "$SERVER_PID"
 	[[ -n "$PCAP_READER_PID" ]] && kill -9 "$PCAP_READER_PID"
-  ../testbed_cleanup.sh
+  ../testbed_cleanup.sh || true
 }
 trap cleanup EXIT
 

@@ -72,6 +72,8 @@ int main(int argc, char *argv[]) {
     const char *err_msg;
     int exit_code = 0;
     char errbuf[PCAP_ERRBUF_SIZE];
+    struct bpf_program filter_program;
+    char filter_expr[] = "sctp";
     char *dev_name;
 
     if (argc < 2) {
@@ -103,6 +105,22 @@ int main(int argc, char *argv[]) {
     // activate capture
     err = pcap_activate(handle);
     if (err) { // print error and exit if an error or a warning is returned
+        err_msg = pcap_statustostr(err);
+        std::cerr << err_msg << std::endl;
+        exit_code = 4;
+        goto cleanup;
+    }
+
+    // set capture filter
+    err = pcap_compile(handle, &filter_program,  filter_expr, 0, PCAP_NETMASK_UNKNOWN);
+    if (err) {
+        err_msg = pcap_statustostr(err);
+        std::cerr << err_msg << std::endl;
+        exit_code = 4;
+        goto cleanup;
+    }
+    err = pcap_setfilter(handle, &filter_program);
+    if (err) {
         err_msg = pcap_statustostr(err);
         std::cerr << err_msg << std::endl;
         exit_code = 4;
