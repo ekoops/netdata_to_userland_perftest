@@ -9,7 +9,7 @@ ARCH := $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/' | sed 's
 all: $(OUTPUT)/$(APP) $(OUTPUT)/$(APP).bpf.o
 
 test: $(OUTPUT)/$(APP) $(OUTPUT)/$(APP).bpf.o
-	sudo $(Q)./test.sh
+	sudo -E $(Q)./test.sh
 
 clean:
 	$(Q)rm -rf $(OUTPUT)

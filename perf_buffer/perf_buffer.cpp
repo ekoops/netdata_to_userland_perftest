@@ -87,6 +87,7 @@ int get_state() {
 
 int main(int argc, char **argv) {
     int err;
+    std::string prog_type;
     int ifindex;
     unsigned long pb_per_cpu_pages, pb_per_cpu_page_size;
     int cpu_num;
@@ -94,20 +95,21 @@ int main(int argc, char **argv) {
     unsigned int pb_prog_fd, pb_map_fd;
     struct perf_buffer *pb = NULL;
 
-    if (argc > 3) {
-        std::cerr << "Usage: ./<prog_name> <ifindex> [<per_cpu_buffer_pages>]" << std::endl;
+    if (argc > 4) {
+        std::cerr << "Usage: ./<prog_name> <xdp|tc> <ifindex> [<per_cpu_buffer_pages>]" << std::endl;
         return 1;
     }
 
     // parsing arguments
     try {
-        ifindex = std::stoi(argv[1]);
+        prog_type = std::string {argv[1]};
+        ifindex = std::stoi(argv[2]);
     } catch (std::exception const& ex) {
         std::cerr << "Failed to parse <ifindex> parameter: " << ex.what() << std::endl;
         return 2;
     }
     try {
-        pb_per_cpu_pages = (argc == 3) ? std::stoi(argv[2]) : 8;
+        pb_per_cpu_pages = (argc == 4) ? std::stoi(argv[3]) : 8;
     } catch (std::exception const& ex) {
         std::cerr << "Failed to parse <per_cpu_buffer_pages> parameter: " << ex.what() << std::endl;
         return 2;
@@ -127,6 +129,10 @@ int main(int argc, char **argv) {
         return 3;
     }
 
+    DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook, .ifindex = ifindex, .attach_point = BPF_TC_INGRESS);
+    DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts, .handle = 1, .priority = 1);
+    bool tc_hook_created = false;
+
     // set up libbpf logging callback
     libbpf_set_print(libbpf_print_fn);
     // set up BPF strict mode
@@ -138,7 +144,40 @@ int main(int argc, char **argv) {
     skel = perf_buffer_bpf__open_and_load();
     if (!skel) {
         std::cerr << "Failed to open skeleton" << std::endl;
-        return 5;
+        return 4;
+    }
+
+    if (prog_type == "xdp") {
+        pb_prog_fd = bpf_program__fd(skel->progs.xdp_probe_f);
+        // attach XDP program to the interface corresponding to the provided ifindex
+        err = bpf_xdp_attach(ifindex, pb_prog_fd, XDP_FLAGS_DRV_MODE /* XDP_FLAGS_SKB_MODE */, NULL);
+        if (err) {
+            std::cerr << "Failed to attach XDP program" << std::endl;
+            goto cleanup_skel_destroy;
+        }
+        std::cout << "Attached XDP program" << std::endl;
+    }
+    else if (prog_type == "tc") {
+        err = bpf_tc_hook_create(&tc_hook);
+        if (!err)
+            tc_hook_created = true;
+        if (err && err != -EEXIST) {
+            std::cerr << "Failed to create TC hook" << std::endl;
+            goto cleanup_skel_destroy;
+        }
+        pb_prog_fd = bpf_program__fd(skel->progs.tc_probe_f);
+        tc_opts.prog_fd = pb_prog_fd;
+        err = bpf_tc_attach(&tc_hook, &tc_opts);
+        if (err) {
+            std::cerr << "Failed to attach TC program" << std::endl;
+            goto cleanup_skel_destroy;
+        }
+        std::cout << "Attached TC program" << std::endl;
+    }
+    else {
+        err = 4;
+        std::cerr << "Wrong prog type parameter (should be xdp or tc)" << std::endl;
+        goto cleanup_skel_destroy;
     }
     pb_prog_fd = bpf_program__fd(skel->progs.xdp_probe_f);
     if (pb_prog_fd == EINVAL) {
@@ -148,6 +187,7 @@ int main(int argc, char **argv) {
 
     // attach XDP program to the interface corresponding to the provided ifindex
     err = bpf_xdp_attach(ifindex, pb_prog_fd, XDP_FLAGS_DRV_MODE, NULL);
+//    err = bpf_xdp_attach(ifindex, pb_prog_fd, XDP_FLAGS_SKB_MODE, NULL);
     if (err) {
         std::cerr << "Failed to attach XDP program" << std::endl;
         goto cleanup_skel_destroy;
@@ -156,14 +196,14 @@ int main(int argc, char **argv) {
     pb_map_fd = bpf_map__fd(skel->maps.pb);
     if (pb_map_fd == EINVAL) {
         std::cerr << "Failed to get perf buffer file descriptor" << std::endl;
-        goto cleanup_xdp_detach;
+        goto cleanup_detach;
     }
 
     // get perf buffer handle
     pb = perf_buffer__new(pb_map_fd, pb_per_cpu_pages, pb_sample_handler, pb_lost_handler, NULL, NULL);
     if (libbpf_get_error(pb)) {
         std::cerr << "Failed to create perf buffer" << std::endl;
-        goto cleanup_xdp_detach;
+        goto cleanup_detach;
     }
 
     // Register signal handlers
@@ -189,9 +229,21 @@ int main(int argc, char **argv) {
 
     cleanup:
     perf_buffer__free(pb);
-    cleanup_xdp_detach:
-    bpf_xdp_detach(ifindex, 0, NULL);
+    cleanup_detach:
+    if (prog_type == "xdp") {
+        bpf_xdp_detach(ifindex, 0, NULL);
+    }
+    else {
+        tc_opts.flags = tc_opts.prog_fd = tc_opts.prog_id = 0;
+        err = bpf_tc_detach(&tc_hook, &tc_opts);
+        if (err) {
+            std::cerr << "Failed to detach TC: "<< err << std::endl;
+        }
+    }
     cleanup_skel_destroy:
+    if (tc_hook_created) {
+        bpf_tc_hook_destroy(&tc_hook);
+    }
     perf_buffer_bpf__destroy(skel);
 
     return err < 0 ? -err : 0;

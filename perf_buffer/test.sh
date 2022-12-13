@@ -32,10 +32,11 @@ iperf3 -s "$SERVER_ADDR" &> /dev/null &
 SERVER_PID=$!
 
 # get ifindex of the interface on which the iperf3 server will listen
+PROG_TYPE="${PROG:-xdp}"
 SERVER_IFACE_IFINDEX=$(ip -o link | grep "$SERVER_IFACE_NAME" | cut -d ':' -f 1)
 
-# load and attach XDP program on the interface and start to read from perf buffer in background
-./.output/perf_buffer "$SERVER_IFACE_IFINDEX" 8 &
+# load and attach XDP/TC program on the interface and start to read from perf buffer in background
+./.output/perf_buffer "$PROG_TYPE" "$SERVER_IFACE_IFINDEX" 8 &
 PERF_READER_PID=$!
 
 # wait for perf buffer reader to be ready
