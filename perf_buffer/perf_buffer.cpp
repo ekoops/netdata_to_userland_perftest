@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
 
     // get some environment information
     pb_per_cpu_page_size = sysconf(_SC_PAGESIZE);
-    cpu_num = std::thread::hardware_concurrency();;
+    cpu_num = std::thread::hardware_concurrency();
     std::cout << "Per-core buffer size set to " << pb_per_cpu_pages * pb_per_cpu_page_size << " bytes (pages: " <<
         pb_per_cpu_pages << ", size: " << pb_per_cpu_page_size << ")\nDetected " << cpu_num << " cpus" << std::endl;
 
@@ -150,7 +150,7 @@ int main(int argc, char **argv) {
     if (prog_type == "xdp") {
         pb_prog_fd = bpf_program__fd(skel->progs.xdp_probe_f);
         // attach XDP program to the interface corresponding to the provided ifindex
-        err = bpf_xdp_attach(ifindex, pb_prog_fd, XDP_FLAGS_DRV_MODE /* XDP_FLAGS_SKB_MODE */, NULL);
+        err = bpf_xdp_attach(ifindex, pb_prog_fd, /*XDP_FLAGS_DRV_MODE*/ XDP_FLAGS_SKB_MODE, NULL);
         if (err) {
             std::cerr << "Failed to attach XDP program" << std::endl;
             goto cleanup_skel_destroy;
@@ -159,14 +159,14 @@ int main(int argc, char **argv) {
     }
     else if (prog_type == "tc") {
         err = bpf_tc_hook_create(&tc_hook);
-        if (!err)
-            tc_hook_created = true;
         if (err && err != -EEXIST) {
             std::cerr << "Failed to create TC hook" << std::endl;
             goto cleanup_skel_destroy;
         }
+        tc_hook_created = true;
         pb_prog_fd = bpf_program__fd(skel->progs.tc_probe_f);
         tc_opts.prog_fd = pb_prog_fd;
+        // attach TC program to the interface corresponding to the provided ifindex
         err = bpf_tc_attach(&tc_hook, &tc_opts);
         if (err) {
             std::cerr << "Failed to attach TC program" << std::endl;
@@ -177,19 +177,6 @@ int main(int argc, char **argv) {
     else {
         err = 4;
         std::cerr << "Wrong prog type parameter (should be xdp or tc)" << std::endl;
-        goto cleanup_skel_destroy;
-    }
-    pb_prog_fd = bpf_program__fd(skel->progs.xdp_probe_f);
-    if (pb_prog_fd == EINVAL) {
-        std::cerr << "Failed to get XDP program file descriptor" << std::endl;
-        goto cleanup_skel_destroy;
-    }
-
-    // attach XDP program to the interface corresponding to the provided ifindex
-    err = bpf_xdp_attach(ifindex, pb_prog_fd, XDP_FLAGS_DRV_MODE, NULL);
-//    err = bpf_xdp_attach(ifindex, pb_prog_fd, XDP_FLAGS_SKB_MODE, NULL);
-    if (err) {
-        std::cerr << "Failed to attach XDP program" << std::endl;
         goto cleanup_skel_destroy;
     }
 
