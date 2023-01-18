@@ -11,6 +11,6 @@ ip netns add ns0
 ip link add "$SERVER_IFACE_NAME" type veth peer name "$CLIENT_IFACE_NAME" netns ns0
 ip link set dev "$SERVER_IFACE_NAME" up
 ip addr add "$SERVER_ADDR"/30 dev "$SERVER_IFACE_NAME"
-ip netns exec ns0 ip link set dev "$CLIENT_IFACE_NAME" up
-ip netns exec ns0 ip addr add "$CLIENT_ADDR"/30 dev "$CLIENT_IFACE_NAME"
-ip netns exec ns0 ip route add default via "$SERVER_ADDR"
+ip -n ns0 link set dev "$CLIENT_IFACE_NAME" up
+ip -n ns0 addr add "$CLIENT_ADDR"/30 dev "$CLIENT_IFACE_NAME"
+ip -n ns0 route add default via "$SERVER_ADDR"

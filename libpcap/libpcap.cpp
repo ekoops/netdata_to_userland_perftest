@@ -73,15 +73,19 @@ int main(int argc, char *argv[]) {
     int exit_code = 0;
     char errbuf[PCAP_ERRBUF_SIZE];
     struct bpf_program filter_program;
-    char filter_expr[] = "sctp";
+    char *filter_expr = NULL;
     char *dev_name;
 
-    if (argc < 2) {
-        std::cerr << "Usage: ./<prog_name> <dev_name>" << std::endl;
+    if (argc < 2 || argc > 3) {
+        std::cerr << "Usage: ./<prog_name> <dev_name> [<capture_filter>]" << std::endl;
         exit_code = 1;
         goto cleanup;
     }
     dev_name = argv[1];
+
+    if (argc == 3) { // capture filter is provided
+        filter_expr = argv[2];
+    }
 
     // init the pcap library
     err = pcap_init(PCAP_CHAR_ENC_UTF_8, errbuf);
@@ -111,20 +115,22 @@ int main(int argc, char *argv[]) {
         goto cleanup;
     }
 
-    // set capture filter
-    err = pcap_compile(handle, &filter_program,  filter_expr, 0, PCAP_NETMASK_UNKNOWN);
-    if (err) {
-        err_msg = pcap_statustostr(err);
-        std::cerr << err_msg << std::endl;
-        exit_code = 4;
-        goto cleanup;
-    }
-    err = pcap_setfilter(handle, &filter_program);
-    if (err) {
-        err_msg = pcap_statustostr(err);
-        std::cerr << err_msg << std::endl;
-        exit_code = 4;
-        goto cleanup;
+    if (filter_expr) {
+        // set capture filter
+        err = pcap_compile(handle, &filter_program,  filter_expr, 0, PCAP_NETMASK_UNKNOWN);
+        if (err) {
+            err_msg = pcap_statustostr(err);
+            std::cerr << err_msg << std::endl;
+            exit_code = 4;
+            goto cleanup;
+        }
+        err = pcap_setfilter(handle, &filter_program);
+        if (err) {
+            err_msg = pcap_statustostr(err);
+            std::cerr << err_msg << std::endl;
+            exit_code = 4;
+            goto cleanup;
+        }
     }
 
     // Register signal handlers

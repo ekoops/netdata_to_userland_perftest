@@ -9,7 +9,7 @@ APP := libpcap
 all: $(OUTPUT)/$(APP)
 
 test: $(OUTPUT)/$(APP)
-	sudo $(Q)./test.sh
+	sudo -E $(Q)./test.sh
 
 clean:
 	$(Q)rm -rf $(OUTPUT)

@@ -1,15 +1,15 @@
-// SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
-// Copyright (c) 2020 Andrii Nakryiko
 #include <mutex>
 #include <condition_variable>
 #include <iostream>
 #include <vector>
+#include <map>
 #include <iomanip>
 #include <thread>
 #include <csignal>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <linux/if_link.h>
+#include <linux/in.h>
 #include <sys/resource.h>
 #include ".output/perf_buffer.skel.h"
 
@@ -19,7 +19,13 @@ std::condition_variable state_cv;
 
 std::vector<unsigned long long> samples;
 std::vector<unsigned long long> losts;
-std::chrono::time_point<std::chrono::system_clock> start, end;
+std::chrono::time_point <std::chrono::system_clock> start, end;
+
+std::map<std::string, int> capture_filters = {
+        {"tcp",  IPPROTO_TCP},
+        {"udp",  IPPROTO_UDP},
+        {"sctp", IPPROTO_SCTP}
+};
 
 int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args) {
     /* Ignore debug-level libbpf logs */
@@ -90,36 +96,55 @@ int main(int argc, char **argv) {
     std::string prog_type;
     int ifindex;
     unsigned long pb_per_cpu_pages, pb_per_cpu_page_size;
+    bool is_filtered = false;
+    int capture_filter;
     int cpu_num;
+    struct bpf_program *pb_prog;
     struct perf_buffer_bpf *skel;
-    unsigned int pb_prog_fd, pb_map_fd;
+    unsigned int pb_prog_fd, pb_map_fd, pb_filter_map_fd;
     struct perf_buffer *pb = NULL;
 
-    if (argc > 4) {
-        std::cerr << "Usage: ./<prog_name> <xdp|tc> <ifindex> [<per_cpu_buffer_pages>]" << std::endl;
+    if (argc < 4 || argc > 5) {
+        std::cerr << "Usage: ./<prog_name> <xdp|tc> <ifindex> <per_cpu_buffer_pages> [<tcp|udp|sctp>]" << std::endl;
         return 1;
     }
 
     // parsing arguments
+    prog_type = std::string{argv[1]};
     try {
-        prog_type = std::string {argv[1]};
         ifindex = std::stoi(argv[2]);
-    } catch (std::exception const& ex) {
+    } catch (std::exception const &ex) {
         std::cerr << "Failed to parse <ifindex> parameter: " << ex.what() << std::endl;
         return 2;
     }
     try {
-        pb_per_cpu_pages = (argc == 4) ? std::stoi(argv[3]) : 8;
-    } catch (std::exception const& ex) {
+        pb_per_cpu_pages = std::stoi(argv[3]);
+    } catch (std::exception const &ex) {
         std::cerr << "Failed to parse <per_cpu_buffer_pages> parameter: " << ex.what() << std::endl;
         return 2;
+    }
+
+    if (argc == 5) { // capture filter is provided
+        auto it = capture_filters.find(std::string{argv[4]});
+        if (it == capture_filters.end()) {
+            std::ostringstream oss;
+            oss << "Capture filter must be set to a value belonging to the following list:\n";
+            for (auto &filter: capture_filters) {
+                oss << filter.first << "\n";
+            }
+            std::cerr << oss.str() << std::endl;
+            return 2;
+        }
+        is_filtered = true;
+        capture_filter = it->second;
     }
 
     // get some environment information
     pb_per_cpu_page_size = sysconf(_SC_PAGESIZE);
     cpu_num = std::thread::hardware_concurrency();
     std::cout << "Per-core buffer size set to " << pb_per_cpu_pages * pb_per_cpu_page_size << " bytes (pages: " <<
-        pb_per_cpu_pages << ", size: " << pb_per_cpu_page_size << ")\nDetected " << cpu_num << " cpus" << std::endl;
+              pb_per_cpu_pages << ", size: " << pb_per_cpu_page_size << ")\nDetected " << cpu_num << " cpus"
+              << std::endl;
 
     try {
         samples = std::vector<unsigned long long>(cpu_num);
@@ -129,9 +154,11 @@ int main(int argc, char **argv) {
         return 3;
     }
 
-    DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook, .ifindex = ifindex, .attach_point = BPF_TC_INGRESS);
-    DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts, .handle = 1, .priority = 1);
-    bool tc_hook_created = false;
+    DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook_ingress,.ifindex = ifindex, .attach_point = BPF_TC_INGRESS);
+    DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook_egress,.ifindex = ifindex, .attach_point = BPF_TC_EGRESS);
+    DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts_ingress,.handle = 1, .priority = 1);
+    DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts_egress,.handle = 2, .priority = 1);
+    bool tc_hook_created_ingress = false, tc_hook_created_egress = false;
 
     // set up libbpf logging callback
     libbpf_set_print(libbpf_print_fn);
@@ -148,36 +175,71 @@ int main(int argc, char **argv) {
     }
 
     if (prog_type == "xdp") {
-        pb_prog_fd = bpf_program__fd(skel->progs.xdp_probe_f);
+        pb_prog = is_filtered ? skel->progs.xdp_probe_filtered_f : skel->progs.xdp_probe_f;
+        pb_prog_fd = bpf_program__fd(pb_prog);
         // attach XDP program to the interface corresponding to the provided ifindex
-        err = bpf_xdp_attach(ifindex, pb_prog_fd, /*XDP_FLAGS_DRV_MODE*/ XDP_FLAGS_SKB_MODE, NULL);
+        err = bpf_xdp_attach(ifindex, pb_prog_fd, XDP_FLAGS_DRV_MODE /*XDP_FLAGS_SKB_MODE*/, NULL);
         if (err) {
             std::cerr << "Failed to attach XDP program" << std::endl;
             goto cleanup_skel_destroy;
         }
         std::cout << "Attached XDP program" << std::endl;
-    }
-    else if (prog_type == "tc") {
-        err = bpf_tc_hook_create(&tc_hook);
+    } else if (prog_type == "tc") {
+        // create ingress TC hook
+        err = bpf_tc_hook_create(&tc_hook_ingress);
         if (err && err != -EEXIST) {
-            std::cerr << "Failed to create TC hook" << std::endl;
+            std::cerr << "Failed to create ingress TC hook" << std::endl;
             goto cleanup_skel_destroy;
         }
-        tc_hook_created = true;
-        pb_prog_fd = bpf_program__fd(skel->progs.tc_probe_f);
-        tc_opts.prog_fd = pb_prog_fd;
-        // attach TC program to the interface corresponding to the provided ifindex
-        err = bpf_tc_attach(&tc_hook, &tc_opts);
+        tc_hook_created_ingress = true;
+
+        // create egress TC hook
+        err = bpf_tc_hook_create(&tc_hook_egress);
+        if (err && err != -EEXIST) {
+            std::cerr << "Failed to create egress TC hook" << std::endl;
+            goto cleanup_skel_destroy;
+        }
+        tc_hook_created_egress = true;
+
+        pb_prog = is_filtered ? skel->progs.tc_probe_filtered_f : skel->progs.tc_probe_f;
+        pb_prog_fd = bpf_program__fd(pb_prog);
+
+        tc_opts_ingress.prog_fd = pb_prog_fd;
+        // attach ingress TC program to the interface corresponding to the provided ifindex
+        err = bpf_tc_attach(&tc_hook_ingress, &tc_opts_ingress);
         if (err) {
-            std::cerr << "Failed to attach TC program" << std::endl;
+            std::cerr << "Failed to attach ingress TC program" << std::endl;
             goto cleanup_skel_destroy;
         }
-        std::cout << "Attached TC program" << std::endl;
-    }
-    else {
+
+        tc_opts_egress.prog_fd = pb_prog_fd;
+        // attach egress TC program to the interface corresponding to the provided ifindex
+        err = bpf_tc_attach(&tc_hook_egress, &tc_opts_egress);
+        if (err) {
+            std::cerr << "Failed to attach egress TC program" << std::endl;
+            goto cleanup_skel_destroy;
+        }
+
+        std::cout << "Attached TC programs" << std::endl;
+    } else {
         err = 4;
         std::cerr << "Wrong prog type parameter (should be xdp or tc)" << std::endl;
         goto cleanup_skel_destroy;
+    }
+
+    // if traffic needs to be filtered, load in kernel the protocol number of traffic we are interested in
+    if (is_filtered) {
+        pb_filter_map_fd = bpf_map__fd(skel->maps.filter_map);
+        if (pb_filter_map_fd == EINVAL) {
+            std::cerr << "Failed to get filter map file descriptor" << std::endl;
+            goto cleanup_detach;
+        }
+        int zero = 0;
+        int result = bpf_map_update_elem(pb_filter_map_fd, &zero, &capture_filter, BPF_EXIST);
+        if (result == -1) {
+            std::cerr << "Failed to update in-kernel traffic capture filter" << std::endl;
+            goto cleanup_detach;
+        }
     }
 
     pb_map_fd = bpf_map__fd(skel->maps.pb);
@@ -193,7 +255,7 @@ int main(int argc, char **argv) {
         goto cleanup_detach;
     }
 
-    // Register signal handlers
+    // register signal handlers
     std::signal(SIGINT, sig_handler);
     std::signal(SIGTERM, sig_handler);
 
@@ -219,17 +281,24 @@ int main(int argc, char **argv) {
     cleanup_detach:
     if (prog_type == "xdp") {
         bpf_xdp_detach(ifindex, 0, NULL);
-    }
-    else {
-        tc_opts.flags = tc_opts.prog_fd = tc_opts.prog_id = 0;
-        err = bpf_tc_detach(&tc_hook, &tc_opts);
+    } else {
+        tc_opts_ingress.flags = tc_opts_ingress.prog_fd = tc_opts_ingress.prog_id = 0;
+        err = bpf_tc_detach(&tc_hook_ingress, &tc_opts_ingress);
         if (err) {
-            std::cerr << "Failed to detach TC: "<< err << std::endl;
+            std::cerr << "Failed to detach ingress TC: " << err << std::endl;
+        }
+        tc_opts_egress.flags = tc_opts_egress.prog_fd = tc_opts_egress.prog_id = 0;
+        err = bpf_tc_detach(&tc_hook_egress, &tc_opts_egress);
+        if (err) {
+            std::cerr << "Failed to detach egress TC: " << err << std::endl;
         }
     }
     cleanup_skel_destroy:
-    if (tc_hook_created) {
-        bpf_tc_hook_destroy(&tc_hook);
+    if (tc_hook_created_ingress) {
+        bpf_tc_hook_destroy(&tc_hook_ingress);
+    }
+    if (tc_hook_created_egress) {
+        bpf_tc_hook_destroy(&tc_hook_egress);
     }
     perf_buffer_bpf__destroy(skel);
 

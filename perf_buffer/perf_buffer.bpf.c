@@ -8,6 +8,13 @@
 #define TC_ACT_OK   0
 
 struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(key_size, sizeof(int));
+    __uint(value_size, sizeof(int));
+    __uint(max_entries, 1);
+} filter_map SEC(".maps");
+
+struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
     __uint(key_size, sizeof(int));
     __uint(value_size, sizeof(int));
@@ -17,28 +24,23 @@ struct metadata {
     __u64 packet_len;
 };
 
-static __always_inline int is_sctp(struct xdp_md *ctx) {
-    void *data = (void *) (long) ctx->data;
-    void *data_end = (void *) (long) ctx->data_end;
+static __always_inline struct iphdr * get_iphdr(void *data, void *data_end) {
     struct ethhdr *eth = (struct ethhdr *) data;
     if ((void *) (eth + 1) > data_end) {
-        return 0;
+        return NULL;
     }
     if (ntohs(eth->h_proto) != ETH_P_IP) {
-        return 0;
+        return NULL;
     }
     struct iphdr *ip = (struct iphdr *) (eth + 1);
     if ((void *) (ip + 1) > data_end) {
-        return 0;
+        return NULL;
     }
-    return (ip->protocol == IPPROTO_SCTP);
+    return ip;
 }
 
 SEC("xdp")
 int xdp_probe_f(struct xdp_md *ctx) {
-//    if (is_sctp(ctx)) {
-//        return XDP_PASS;
-//    }
     __u64 len = (ctx->data_end - ctx->data);
     __u64 flags = (len << 32) | BPF_F_CURRENT_CPU;
     struct metadata m = {.packet_len = len};
@@ -48,6 +50,48 @@ int xdp_probe_f(struct xdp_md *ctx) {
 
 SEC("tc")
 int tc_probe_f(struct __sk_buff *ctx) {
+    __u64 len = (ctx->data_end - ctx->data);
+    __u64 flags = (len << 32) | BPF_F_CURRENT_CPU;
+    struct metadata m = {.packet_len = len};
+    bpf_perf_event_output(ctx, &pb, flags, &m, sizeof(m));
+    return TC_ACT_OK;
+}
+
+SEC("xdp")
+int xdp_probe_filtered_f(struct xdp_md *ctx) {
+    struct iphdr *ip = get_iphdr((void *) (long) ctx->data, (void *) (long) ctx->data_end);
+    if (!ip) {
+        return XDP_PASS;
+    }
+    int zero = 0;
+    int *proto = bpf_map_lookup_elem(&filter_map, &zero);
+    if (!proto) {
+        return XDP_PASS;
+    }
+    if (ip->protocol != *proto) {
+        return XDP_PASS;
+    }
+    __u64 len = (ctx->data_end - ctx->data);
+    __u64 flags = (len << 32) | BPF_F_CURRENT_CPU;
+    struct metadata m = {.packet_len = len};
+    bpf_perf_event_output(ctx, &pb, flags, &m, sizeof(m));
+    return XDP_PASS;
+}
+
+SEC("tc")
+int tc_probe_filtered_f(struct __sk_buff *ctx) {
+    struct iphdr *ip = get_iphdr((void *) (long) ctx->data, (void *) (long) ctx->data_end);
+    if (!ip) {
+        return TC_ACT_OK;
+    }
+    int zero = 0;
+    int *proto = bpf_map_lookup_elem(&filter_map, &zero);
+    if (!proto) {
+        return TC_ACT_OK;
+    }
+    if (ip->protocol != *proto) {
+        return TC_ACT_OK;
+    }
     __u64 len = (ctx->data_end - ctx->data);
     __u64 flags = (len << 32) | BPF_F_CURRENT_CPU;
     struct metadata m = {.packet_len = len};
