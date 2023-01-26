@@ -1,5 +1,5 @@
 OUTPUT := .output
-CLANG++ := clang++
+CLANG := clang
 APP := tcpgen
 
 all: $(OUTPUT)/$(APP)
@@ -11,6 +11,6 @@ $(OUTPUT):
 	$(Q)mkdir -p $@
 
 # Build user-space code
-$(OUTPUT)/$(APP): $(APP).cpp | $(OUTPUT)
+$(OUTPUT)/$(APP): $(APP).c | $(OUTPUT)
 	$(call msg,BINARY,$@)
-	$(Q)$(CLANG++) $(INCLUDES) $(APP).cpp -o $@
+	$(Q)$(CLANG) $(INCLUDES) $(APP).c -o $@

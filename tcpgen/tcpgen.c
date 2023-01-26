@@ -1,11 +1,14 @@
 #include <stdio.h>
-#include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <limits.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <iostream>
 
+#define MAX_PORT_NUM        0xffff
+#define MAX_BUFF_SZ         0xffff
 #define MAX_RETRY_ATTEMPTS  3
 #define ALPHA_SIZE          63
 #define ALPHA_SYMBOLS       (ALPHA_SIZE - 1)
@@ -109,98 +112,112 @@ void server_conn_handler(int connfd, uint16_t buff_sz) {
 int main(int argc, char *argv[]) {
     struct sockaddr_in serv_addr, client_addr;
     socklen_t len = sizeof(struct sockaddr_in);
-    bool is_server;
+    int is_server;
     uint32_t ip;
     uint8_t *ip_ptr;
-    uint16_t port;
-    uint16_t buff_sz;
+    long port, buff_sz;
     int sockfd, connfd;
 
     if (argc < 4) {
-        std::cerr << "Usage: ./<prog_name> -c|-s <ip> <port> <buff_sz>" << std::endl;
-        std::exit(1);
+        fprintf(stderr, "Usage: ./<prog_name> -c|-s <ip> <port> <buff_sz>\n");
+        exit(1);
     }
 
     // parse arguments
     if (!strcmp(argv[1], "-s")) {
-        is_server = true;
+        is_server = 1;
     } else if (!strcmp(argv[1], "-c")) {
-        is_server = false;
+        is_server = 0;
     } else {
-        std::cerr << "First argument must be -c or -s";
-        std::exit(2);
+        fprintf(stderr, "First argument must be -c or -s\n");
+        exit(2);
     }
 
     // parse ip
     ip_ptr = (uint8_t * ) & ip;
     if (sscanf(argv[2], "%hhd.%hhd.%hhd.%hhd", ip_ptr + 3, ip_ptr + 2, ip_ptr + 1, ip_ptr) != 4) {
-        std::cerr << "Failed to parse IP address: " << argv[2] << std::endl;
-        std::exit(3);
+        fprintf(stderr, "Failed to parse IP address: %s\n", argv[2]);
+        exit(3);
     }
 
     // parse port
-    try {
-        port = std::stoi(argv[3]);
-    } catch (std::exception const &ex) {
-        std::cerr << "Failed to parse <port> parameter: " << ex.what() << std::endl;
-        std::exit(5);
+    port = strtol(argv[3], NULL, 10);
+    if (!port) {
+        fprintf(stderr, "Failed to convert <port> parameter\n");
+        exit(4);
+    }
+    if (errno == ERANGE && (port == LONG_MAX || port == LONG_MIN)) {
+        fprintf(stderr, "Failed to parse <port> parameter: %s\n", strerror(errno));
+        exit(4);
+    }
+    if (port > MAX_PORT_NUM) {
+        fprintf(stderr, "<port> parameter must be less than %d\n", MAX_PORT_NUM + 1);
+        exit(4);
     }
 
     // parse buffer size
-    try {
-        buff_sz = std::stoi(argv[4]);
-    } catch (std::exception const &ex) {
-        std::cerr << "Failed to parse <buff_sz> parameter: " << ex.what() << std::endl;
-        std::exit(6);
+    buff_sz = strtol(argv[4], NULL, 10);
+    if (!buff_sz) {
+        fprintf(stderr, "Failed to convert <buff_sz> parameter\n");
+        exit(5);
+    }
+    if (errno == ERANGE && (buff_sz == LONG_MAX || buff_sz == LONG_MIN)) {
+        fprintf(stderr, "Failed to parse <buff_sz> parameter: %s\n", strerror(errno));
+        exit(5);
+    }
+    if (buff_sz > MAX_BUFF_SZ) {
+        fprintf(stderr, "<buff_sz> parameter must be less than %d\n", MAX_BUFF_SZ + 1);
+        exit(5);
     }
 
     // create socket
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd == -1) {
-        std::cerr << "Failed to create socket" << std::endl;
-        std::exit(7);
+        fprintf(stderr, "Failed to create socket\n");
+        exit(6);
     }
+    printf("PORT: %d\tBUFF_SIZE: %d\n", (uint16_t) port, (uint16_t) buff_sz);
 
     // init sockaddr_in struct for server address
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = htonl(ip);
-    serv_addr.sin_port = htons(port);
+    serv_addr.sin_port = htons((uint16_t) port);
 
     if (is_server) {
         // bind newly created socket to given IP and port
         if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr))) {
-            std::cerr << "Failed to bind socket" << std::endl;
-            std::exit(10);
+            fprintf(stderr, "Failed to bind socket\n");
+            exit(10);
 
         }
 
         // listen on socket
         if ((listen(sockfd, 1))) {
-            std::cerr << "Failed to listen on socket" << std::endl;
-            std::exit(11);
+            fprintf(stderr, "Failed to listen on socket\n");
+            exit(11);
         }
 
         // accept connection from client
         connfd = accept(sockfd, (struct sockaddr *) &client_addr, &len);
         if (connfd < 0) {
-            std::cerr << "Failed to accept on socket" << std::endl;
-            std::exit(12);
+            fprintf(stderr, "Failed to accept on socket\n");
+            exit(12);
         }
-        std::cout << "Accepted client connection" << std::endl;
+        printf("Accepted client connection\n");
 
         // handle connection
-        server_conn_handler(connfd, buff_sz);
+        server_conn_handler(connfd, (uint16_t) buff_sz);
     } else {
         // connect client socket to server socket
         if (connect(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr))) {
-            std::cout << "Failed to connect to server" << std::endl;
-            std::exit(20);
+            printf("Failed to connect to server\n");
+            exit(20);
         }
-        std::cout << "Connected to server" << std::endl;
+        printf("Connected to server\n");
 
         // handle connection
-        client_conn_handler(sockfd, buff_sz);
+        client_conn_handler(sockfd, (uint16_t) buff_sz);
     }
 
     // close the socket
