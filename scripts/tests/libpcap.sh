@@ -5,21 +5,31 @@ if [ "$EUID" -ne 0 ]; then
   exit
 fi
 
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
 function cleanup {
   set +e
   [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID"
   [[ -n "$PCAP_READER_PID" ]] && wait "$PCAP_READER_PID"
-  ../../scripts/testbed_cleanup.sh || true
+  "$SCRIPT_DIR"/../testbed/cleanup.sh || true
 }
 trap cleanup EXIT
 
 set -x -e
 
+if [[ -z "$OUTPUT_DIR" ]]; then
+  echo "Please provide output folder path"
+  exit
+fi
+
+CLIENT_NETNS_NAME=${CLIENT_NETNS_NAME:-ns0}
+CLIENT_IFACE_NAME=${CLIENT_IFACE_NAME:-veth0_}
+SERVER_IFACE_NAME=${SERVER_IFACE_NAME:-veth0}
+CLIENT_IFACE_ADDR=${CLIENT_IFACE_ADDR:-10.0.0.1}
+SERVER_IFACE_ADDR=${SERVER_IFACE_ADDR:-10.0.0.2}
 CLIENT_PIN_CORE_NUM=${CLIENT_PIN_CORE_NUM:-0}
 READER_PIN_CORE_NUM=${READER_PIN_CORE_NUM:-1}
 SERVER_PIN_CORE_NUM=${SERVER_PIN_CORE_NUM:-2}
-CLIENT_ADDR=${CLIENT_ADDR:-10.0.0.1}
-SERVER_ADDR=${SERVER_ADDR:-10.0.0.2}
 SERVER_PORT=${SERVER_PORT:-5201}
 PACKET_LEN=${PACKET_LEN:-512}
 
@@ -47,23 +57,23 @@ else
 fi
 
 # testbed setup
-CLIENT_ADDR="$CLIENT_ADDR" SERVER_ADDR="$SERVER_ADDR" ../../scripts/testbed_setup.sh
+"$SCRIPT_DIR"/../testbed/setup.sh
 
 # start server
 if [[ "$GEN" == "iperf3" ]]; then
-  iperf3 -s "$SERVER_ADDR" &>/dev/null &
+  iperf3 -s "$SERVER_IFACE_ADDR" &>/dev/null &
 else
-  taskset $((1 << SERVER_PIN_CORE_NUM)) ../tools/tcpgen/.output/tcpgen -s "$SERVER_ADDR" "$SERVER_PORT" "$PACKET_LEN" &>/dev/null &
+  taskset $((1 << SERVER_PIN_CORE_NUM)) "$OUTPUT_DIR"/tools/tcpgen -s "$SERVER_IFACE_ADDR" "$SERVER_PORT" "$PACKET_LEN" &>/dev/null &
 fi
 SERVER_PID=$!
 
 # activate random packet dropper if generated traffic is TCP
 if [[ "$TRAFFIC" == "tcp" ]]; then
-  ip link set dev veth0 xdpdrv obj ../../common/.output/dropper.bpf.o sec xdp
+  ip link set dev veth0 xdpdrv obj "$OUTPUT_DIR"/common/dropper.bpf.o sec xdp
 fi
 
 # start pcap reader in background
-taskset $((1 << READER_PIN_CORE_NUM)) ./.output/libpcap veth0 "$READER_TRAFFIC_FILTER" &
+taskset $((1 << READER_PIN_CORE_NUM)) "$OUTPUT_DIR"/libpcap/libpcap veth0 "$READER_TRAFFIC_FILTER" &
 PCAP_READER_PID=$!
 
 # wait for pcap reader to be ready
@@ -74,9 +84,9 @@ kill -SIGINT $PCAP_READER_PID
 # start client
 if [[ "$GEN" == "iperf3" ]]; then
   # shellcheck disable=SC2086
-  ip netns exec ns0 iperf3 -A "$CLIENT_PIN_CORE_NUM","$SERVER_PIN_CORE_NUM" -c "$SERVER_ADDR" $CLIENT_FLAGS
+  ip netns exec "$CLIENT_NETNS_NAME" iperf3 -A "$CLIENT_PIN_CORE_NUM","$SERVER_PIN_CORE_NUM" -c "$SERVER_IFACE_ADDR" $CLIENT_FLAGS
 else
-  ip netns exec ns0 taskset $((1 << CLIENT_PIN_CORE_NUM)) ../tools/tcpgen/.output/tcpgen -c "$SERVER_ADDR" "$SERVER_PORT" "$PACKET_LEN"
+  ip netns exec "$CLIENT_NETNS_NAME" taskset $((1 << CLIENT_PIN_CORE_NUM)) "$OUTPUT_DIR"/tools/tcpgen -c "$SERVER_IFACE_ADDR" "$SERVER_PORT" "$PACKET_LEN"
 fi
 
 # notify pcap reader to stop reading and wait for it to exit

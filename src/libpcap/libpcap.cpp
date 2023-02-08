@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <csignal>
 #include <pcap/pcap.h>
+#include <process_state.h>
 #include "PacketHandler.h"
 
 #define SNAPSHOT_LEN            65535
@@ -14,19 +15,14 @@
     ({                                                  \
         if (set_opt_func(pcap_h, opt_value)) {          \
             std::cerr << err_msg << std::endl;          \
-            exit(exit_code);                            \
+            std::exit(exit_code);                       \
         }                                               \
     })
 
 pcap_t *handle = NULL;
 
-int state = 0;
-std::mutex state_mutex;
-std::condition_variable state_cv;
-
-unsigned long long samples;
-unsigned long long losts;
-std::chrono::time_point <std::chrono::system_clock> start, end;
+process_state proc_state {};
+unsigned long long samples, losts;
 
 void pcap_set_options() {
     SET_OPTION_OR_EXIT(handle, pcap_set_snaplen, SNAPSHOT_LEN, "Failed to set the snapshot length", 101);
@@ -36,35 +32,19 @@ void pcap_set_options() {
 
 
 void pcap_handler_cb(u_char *user, const struct pcap_pkthdr *pkt_hdr, const u_char *pkt_payload) {
-    PacketHandler *packet_handler = (PacketHandler *) user;
-    packet_handler->handle(pkt_payload, pkt_hdr->caplen, pkt_hdr->ts);
+//    PacketHandler *packet_handler = (PacketHandler *) user;
+//    packet_handler->handle(pkt_payload, pkt_hdr->caplen, pkt_hdr->ts);
     samples++;
 }
 
 static void sig_handler(int sig) {
-    std::unique_lock <std::mutex> ul{state_mutex};
-    if (state == 0) {
-        start = std::chrono::system_clock::now();
-    }
-    state++;
-    if (state == 2) {
-        pcap_breakloop(handle);
-    }
-    state_cv.notify_all();
-}
-
-void wait_for_signal() {
-    std::unique_lock <std::mutex> ul{state_mutex};
-
-    while (state == 0) {
-        state_cv.wait(ul);
-    }
+    proc_state.signal([](){ pcap_breakloop(handle); });
 }
 
 void print_stats() {
     auto w = std::setw(21);
     std::cout << "Total:\t" << w << samples << w << losts << std::endl;
-    std::chrono::duration<double> time = end - start;
+    std::chrono::duration<double> time = proc_state.get_time();
     std::cout << "Time:\t" << w << time.count() << std::endl;
     std::cout << "Pps:\t" << w << (samples / time.count()) << std::endl;
 }
@@ -146,7 +126,7 @@ int main(int argc, char *argv[]) {
 
     // wait for signal before start reading
     std::cout << "Waiting for external signal..." << std::endl;
-    wait_for_signal();
+    proc_state.wait();
 
     // start reading loop
     std::cout << "Starting to read..." << std::endl;
@@ -162,7 +142,6 @@ int main(int argc, char *argv[]) {
             exit_code = 6;
             goto cleanup;
         default: // match if PCAP_ERROR_BREAK or 0 (0 never happen)
-            end = std::chrono::system_clock::now();
             print_stats();
     }
 

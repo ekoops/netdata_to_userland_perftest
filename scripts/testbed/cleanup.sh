@@ -1,0 +1,9 @@
+#!/bin/bash
+
+set -x
+
+CLIENT_NETNS_NAME=${CLIENT_NETNS_NAME:-ns0}
+SERVER_IFACE_NAME=${SERVER_IFACE_NAME:-veth0}
+
+ip link del dev "$SERVER_IFACE_NAME"
+ip netns del "$CLIENT_NETNS_NAME"

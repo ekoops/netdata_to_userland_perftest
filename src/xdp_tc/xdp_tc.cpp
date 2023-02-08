@@ -11,15 +11,12 @@
 #include <linux/if_link.h>
 #include <linux/in.h>
 #include <sys/resource.h>
-#include ".output/xdp_tc.skel.h"
+#include <process_state.h>
+#include <libbpf_util.h>
+#include "xdp_tc.skel.h"
 
-int state = 0;
-std::mutex state_mutex;
-std::condition_variable state_cv;
-
-std::vector<unsigned long long> samples;
-std::vector<unsigned long long> losts;
-std::chrono::time_point <std::chrono::system_clock> start, end;
+process_state proc_state {};
+std::vector<unsigned long long> samples, losts;
 
 std::map<std::string, int> capture_filters = {
         {"tcp",  IPPROTO_TCP},
@@ -27,32 +24,8 @@ std::map<std::string, int> capture_filters = {
         {"sctp", IPPROTO_SCTP}
 };
 
-int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args) {
-    /* Ignore debug-level libbpf logs */
-    if (level > LIBBPF_INFO)
-        return 0;
-    return vfprintf(stderr, format, args);
-}
-
-void bump_memlock_rlimit(void) {
-    struct rlimit rlim_new = {
-            .rlim_cur    = RLIM_INFINITY,
-            .rlim_max    = RLIM_INFINITY,
-    };
-
-    if (setrlimit(RLIMIT_MEMLOCK, &rlim_new)) {
-        std::cerr << "Failed to increase RLIMIT_MEMLOCK limit!" << std::endl;
-        exit(1);
-    }
-}
-
 static void sig_handler(int sig) {
-    std::unique_lock <std::mutex> ul{state_mutex};
-    if (state == 0) {
-        start = std::chrono::system_clock::now();
-    }
-    state++;
-    state_cv.notify_all();
+    proc_state.signal();
 }
 
 void pb_sample_handler(void *ctx, int cpu, void *data, __u32 size) {
@@ -74,21 +47,9 @@ void print_stats(int cpu_num) {
         std::cout << "Core " << i << ":\t" << w << samples[i] << w << losts[i] << std::endl;
     }
     std::cout << "Total:\t" << w << samples_tot << w << losts_tot << std::endl;
-    std::chrono::duration<double> time = end - start;
+    std::chrono::duration<double> time = proc_state.get_time();
     std::cout << "Time:\t" << w << time.count() << std::endl;
     std::cout << "Pps:\t" << w << (samples_tot / time.count()) << std::endl;
-}
-
-void wait_for_signal() {
-    std::unique_lock <std::mutex> ul{state_mutex};
-    while (state == 0) {
-        state_cv.wait(ul);
-    }
-}
-
-int get_state() {
-    std::unique_lock <std::mutex> ul{state_mutex};
-    return state;
 }
 
 int main(int argc, char **argv) {
@@ -244,6 +205,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    // get perf buffer file descriptor
     pb_map_fd = bpf_map__fd(skel->maps.pb);
     if (pb_map_fd == EINVAL) {
         err = 7;
@@ -265,19 +227,22 @@ int main(int argc, char **argv) {
 
     // wait for signal before start reading from perf buffer
     std::cout << "Waiting for external signal..." << std::endl;
-    wait_for_signal();
+    proc_state.wait();
 
     // Read samples from perf buffer
     std::cout << "Starting to read from perf buffer..." << std::endl;
-    while (get_state() != 2) {
+    while (proc_state.get_state() != 2) {
         err = perf_buffer__poll(pb, 100 /* timeout, ms */);
-        if (err < 0 && err != -EINTR) {
+        if (err == -EINTR) {
+            err = 0;
+            break;
+        }
+        if (err < 0) {
             std::cerr << "Failed to read from perf buffer: " << err << std::endl;
             goto cleanup;
         }
     }
     // print results
-    end = std::chrono::system_clock::now();
     print_stats(cpu_num);
 
     cleanup:
